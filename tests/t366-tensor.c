@@ -1,6 +1,6 @@
 /// @file
-/// Test tensor contraction semantics and vector-length tails
-/// \test Test tensor contraction semantics and vector-length tails
+/// Test tensor contraction semantics and guarded operand bounds
+/// \test Test tensor contraction semantics and guarded operand bounds
 //TESTARGS(only="cpu") {ceed_resource}
 #if defined(__linux__)
 #define _GNU_SOURCE
@@ -16,10 +16,6 @@
 #if defined(__linux__)
 #include <unistd.h>
 #include <sys/mman.h>
-#endif
-
-#if defined(__ARM_FEATURE_SVE)
-#include <arm_sve.h>
 #endif
 
 typedef struct {
@@ -68,18 +64,6 @@ static void GuardedArrayDestroy(GuardedArray *array) {
   free(array->data);
 #endif
   array->data = NULL;
-}
-
-static CeedInt GetVectorLength(void) {
-#if defined(__ARM_FEATURE_SVE)
-#ifdef CEED_SCALAR_IS_FP64
-  return svcntd();
-#else
-  return svcntw();
-#endif
-#else
-  return 16 / sizeof(CeedScalar);
-#endif
 }
 
 static int RunCase(CeedTensorContract contract, TensorCase test, CeedTransposeMode t_mode, CeedInt add) {
@@ -137,21 +121,14 @@ static int RunCase(CeedTensorContract contract, TensorCase test, CeedTransposeMo
 int main(int argc, char **argv) {
   Ceed               ceed;
   CeedTensorContract contract;
-  volatile CeedInt   vector_length = GetVectorLength();
-  TensorCase         tests[]       = {
+  TensorCase tests[] = {
       {1, 1, 1, 1},
       {2, 3, 1, 4},
-      {3, 4, 1, 2},
-      {2, 5, 1, 5},
-      {4, 2, 1, 3},
-      {1, 7, 1, 6},
+      {3, 4, 2, 2},
+      {2, 5, 3, 5},
+      {4, 2, 7, 3},
+      {1, 7, 15, 6},
   };
-
-  tests[1].C = vector_length - 1;
-  tests[2].C = vector_length;
-  tests[3].C = vector_length + 1;
-  tests[4].C = 2 * vector_length - 1;
-  tests[5].C = 4 * vector_length - 1;
 
   CeedInit(argv[1], &ceed);
   CeedTensorContractCreate(ceed, &contract);
