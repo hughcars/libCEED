@@ -62,12 +62,14 @@ static inline int CeedElemRestrictionApplyOffsetNoTranspose_Ref_Core(CeedElemRes
                                                                      const CeedScalar *__restrict__ uu, CeedScalar *__restrict__ vv) {
   // Default restriction with offsets
   CeedElemRestriction_Ref *impl;
+  const CeedInt *restrict  offsets;
 
   CeedCallBackend(CeedElemRestrictionGetData(rstr, &impl));
+  offsets = impl->offsets;
   for (CeedSize e = start * block_size; e < stop * block_size; e += block_size) {
     for (CeedSize k = 0; k < num_comp; k++) {
       CeedPragmaSIMD for (CeedSize i = 0; i < elem_size * block_size; i++) {
-        vv[elem_size * (k * block_size + e * num_comp) + i - v_offset] = uu[impl->offsets[i + e * elem_size] + k * comp_stride];
+        vv[elem_size * (k * block_size + e * num_comp) + i - v_offset] = uu[offsets[i + e * elem_size] + k * comp_stride];
       }
     }
   }
@@ -223,8 +225,10 @@ static inline int CeedElemRestrictionApplyOffsetTranspose_Ref_Core(CeedElemRestr
                                                                    const CeedScalar *__restrict__ uu, CeedScalar *__restrict__ vv) {
   // Default restriction with offsets
   CeedElemRestriction_Ref *impl;
+  const CeedInt *restrict  offsets;
 
   CeedCallBackend(CeedElemRestrictionGetData(rstr, &impl));
+  offsets = impl->offsets;
   for (CeedSize e = start * block_size; e < stop * block_size; e += block_size) {
     for (CeedSize k = 0; k < num_comp; k++) {
       for (CeedSize i = 0; i < elem_size * block_size; i += block_size) {
@@ -233,7 +237,7 @@ static inline int CeedElemRestrictionApplyOffsetTranspose_Ref_Core(CeedElemRestr
           CeedScalar vv_loc;
 
           vv_loc = uu[elem_size * (k * block_size + e * num_comp) + j - v_offset];
-          CeedPragmaAtomic vv[impl->offsets[j + e * elem_size] + k * comp_stride] += vv_loc;
+          CeedPragmaAtomic vv[offsets[j + e * elem_size] + k * comp_stride] += vv_loc;
         }
       }
     }

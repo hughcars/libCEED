@@ -348,16 +348,28 @@ static int CeedBasisCreateProjectionMatrices(CeedBasis basis_from, CeedBasis bas
   @ref Developer
 **/
 static int CeedBasisApplyCheckDims(CeedBasis basis, CeedInt num_elem, CeedTransposeMode t_mode, CeedEvalMode eval_mode, CeedVector u, CeedVector v) {
-  CeedInt  dim, num_comp, q_comp, num_nodes, num_qpts;
-  CeedSize u_length = 0, v_length;
+  CeedInt q_comp;
 
-  CeedCall(CeedBasisGetDimension(basis, &dim));
-  CeedCall(CeedBasisGetNumComponents(basis, &num_comp));
-  CeedCall(CeedBasisGetNumQuadratureComponents(basis, eval_mode, &q_comp));
-  CeedCall(CeedBasisGetNumNodes(basis, &num_nodes));
-  CeedCall(CeedBasisGetNumQuadraturePoints(basis, &num_qpts));
-  CeedCall(CeedVectorGetLength(v, &v_length));
-  if (u) CeedCall(CeedVectorGetLength(u, &u_length));
+  switch (eval_mode) {
+    case CEED_EVAL_INTERP:
+      q_comp = (basis->fe_space == CEED_FE_SPACE_H1) ? 1 : basis->dim;
+      break;
+    case CEED_EVAL_GRAD:
+      q_comp = basis->dim;
+      break;
+    case CEED_EVAL_DIV:
+      q_comp = 1;
+      break;
+    case CEED_EVAL_CURL:
+      q_comp = (basis->dim < 3) ? 1 : basis->dim;
+      break;
+    case CEED_EVAL_NONE:
+    case CEED_EVAL_WEIGHT:
+      q_comp = 1;
+      break;
+  }
+  const CeedSize u_length = u ? u->length : 0;
+  const CeedSize v_length = v->length;
 
   // Check vector lengths to prevent out of bounds issues
   bool has_good_dims = true;
@@ -367,13 +379,15 @@ static int CeedBasisApplyCheckDims(CeedBasis basis, CeedInt num_elem, CeedTransp
     case CEED_EVAL_GRAD:
     case CEED_EVAL_DIV:
     case CEED_EVAL_CURL:
-      has_good_dims = ((t_mode == CEED_TRANSPOSE && u_length >= (CeedSize)num_elem * (CeedSize)num_comp * (CeedSize)num_qpts * (CeedSize)q_comp &&
-                        v_length >= (CeedSize)num_elem * (CeedSize)num_comp * (CeedSize)num_nodes) ||
-                       (t_mode == CEED_NOTRANSPOSE && v_length >= (CeedSize)num_elem * (CeedSize)num_qpts * (CeedSize)num_comp * (CeedSize)q_comp &&
-                        u_length >= (CeedSize)num_elem * (CeedSize)num_comp * (CeedSize)num_nodes));
+      has_good_dims = ((t_mode == CEED_TRANSPOSE &&
+                        u_length >= (CeedSize)num_elem * (CeedSize)basis->num_comp * (CeedSize)basis->Q * (CeedSize)q_comp &&
+                        v_length >= (CeedSize)num_elem * (CeedSize)basis->num_comp * (CeedSize)basis->P) ||
+                       (t_mode == CEED_NOTRANSPOSE &&
+                        v_length >= (CeedSize)num_elem * (CeedSize)basis->Q * (CeedSize)basis->num_comp * (CeedSize)q_comp &&
+                        u_length >= (CeedSize)num_elem * (CeedSize)basis->num_comp * (CeedSize)basis->P));
       break;
     case CEED_EVAL_WEIGHT:
-      has_good_dims = v_length >= (CeedSize)num_elem * (CeedSize)num_qpts;
+      has_good_dims = v_length >= (CeedSize)num_elem * (CeedSize)basis->Q;
       break;
   }
   CeedCheck(has_good_dims, CeedBasisReturnCeed(basis), CEED_ERROR_DIMENSION, "Input/output vectors too short for basis and evaluation mode");
@@ -559,7 +573,7 @@ static int CeedBasisApplyAtPoints_Core(CeedBasis basis, bool apply_add, CeedInt 
       CeedCall(CeedVectorGetArrayWrite(v, CEED_MEM_HOST, &v_array));
       switch (eval_mode) {
         case CEED_EVAL_INTERP: {
-          CeedScalar tmp[2][num_comp * CeedIntPow(Q_1d, dim)], chebyshev_x[Q_1d];
+          CeedScalar tmp[2][num_comp * CeedIntPow(Q_1d, dim)], chebyshev_x[Q_1d + 2 /* pad: see fixed-LIBXSMM tail-load note above */];
 
           // ---- Values at point
           for (CeedInt p = 0; p < total_num_points; p++) {
@@ -578,7 +592,7 @@ static int CeedBasisApplyAtPoints_Core(CeedBasis basis, bool apply_add, CeedInt 
           break;
         }
         case CEED_EVAL_GRAD: {
-          CeedScalar tmp[2][num_comp * CeedIntPow(Q_1d, dim)], chebyshev_x[Q_1d];
+          CeedScalar tmp[2][num_comp * CeedIntPow(Q_1d, dim)], chebyshev_x[Q_1d + 2 /* pad: see fixed-LIBXSMM tail-load note above */];
 
           // ---- Values at point
           for (CeedInt p = 0; p < total_num_points; p++) {
@@ -626,7 +640,7 @@ static int CeedBasisApplyAtPoints_Core(CeedBasis basis, bool apply_add, CeedInt 
 
       switch (eval_mode) {
         case CEED_EVAL_INTERP: {
-          CeedScalar tmp[2][num_comp * CeedIntPow(Q_1d, dim)], chebyshev_x[Q_1d];
+          CeedScalar tmp[2][num_comp * CeedIntPow(Q_1d, dim)], chebyshev_x[Q_1d + 2 /* pad: see fixed-LIBXSMM tail-load note above */];
 
           // ---- Values at point
           for (CeedInt p = 0; p < total_num_points; p++) {
@@ -645,7 +659,7 @@ static int CeedBasisApplyAtPoints_Core(CeedBasis basis, bool apply_add, CeedInt 
           break;
         }
         case CEED_EVAL_GRAD: {
-          CeedScalar tmp[2][num_comp * CeedIntPow(Q_1d, dim)], chebyshev_x[Q_1d];
+          CeedScalar tmp[2][num_comp * CeedIntPow(Q_1d, dim)], chebyshev_x[Q_1d + 2 /* pad: see fixed-LIBXSMM tail-load note above */];
 
           // ---- Values at point
           for (CeedInt p = 0; p < total_num_points; p++) {
@@ -1590,8 +1604,8 @@ int CeedBasisCreateTensorH1(Ceed ceed, CeedInt dim, CeedInt num_comp, CeedInt P_
   CeedCall(CeedCalloc(Q_1d, &(*basis)->q_weight_1d));
   if (q_ref_1d) memcpy((*basis)->q_ref_1d, q_ref_1d, Q_1d * sizeof(q_ref_1d[0]));
   if (q_weight_1d) memcpy((*basis)->q_weight_1d, q_weight_1d, Q_1d * sizeof(q_weight_1d[0]));
-  CeedCall(CeedCalloc(Q_1d * P_1d, &(*basis)->interp_1d));
-  CeedCall(CeedCalloc(Q_1d * P_1d, &(*basis)->grad_1d));
+  CeedCall(CeedCalloc(Q_1d * P_1d + 8 /* pad: fixed-LIBXSMM neov2 kernels issue unpredicated vector tail loads that may read one vector past the contraction t operand */, &(*basis)->interp_1d));
+  CeedCall(CeedCalloc(Q_1d * P_1d + 8, &(*basis)->grad_1d));
   if (interp_1d) memcpy((*basis)->interp_1d, interp_1d, Q_1d * P_1d * sizeof(interp_1d[0]));
   if (grad_1d) memcpy((*basis)->grad_1d, grad_1d, Q_1d * P_1d * sizeof(grad_1d[0]));
   CeedCall(ceed->BasisCreateTensorH1(dim, P_1d, Q_1d, interp_1d, grad_1d, q_ref_1d, q_weight_1d, *basis));
@@ -1726,8 +1740,8 @@ int CeedBasisCreateH1(Ceed ceed, CeedElemTopology topo, CeedInt num_comp, CeedIn
   CeedCall(CeedCalloc(Q, &(*basis)->q_weight_1d));
   if (q_ref) memcpy((*basis)->q_ref_1d, q_ref, Q * dim * sizeof(q_ref[0]));
   if (q_weight) memcpy((*basis)->q_weight_1d, q_weight, Q * sizeof(q_weight[0]));
-  CeedCall(CeedCalloc(Q * P, &(*basis)->interp));
-  CeedCall(CeedCalloc(dim * Q * P, &(*basis)->grad));
+  CeedCall(CeedCalloc(Q * P + 8, &(*basis)->interp));
+  CeedCall(CeedCalloc(dim * Q * P + 8, &(*basis)->grad));
   if (interp) memcpy((*basis)->interp, interp, Q * P * sizeof(interp[0]));
   if (grad) memcpy((*basis)->grad, grad, dim * Q * P * sizeof(grad[0]));
   CeedCall(ceed->BasisCreateH1(topo, dim, P, Q, interp, grad, q_ref, q_weight, *basis));
@@ -1785,8 +1799,8 @@ int CeedBasisCreateHdiv(Ceed ceed, CeedElemTopology topo, CeedInt num_comp, Ceed
   CeedCall(CeedMalloc(Q, &(*basis)->q_weight_1d));
   if (q_ref) memcpy((*basis)->q_ref_1d, q_ref, Q * dim * sizeof(q_ref[0]));
   if (q_weight) memcpy((*basis)->q_weight_1d, q_weight, Q * sizeof(q_weight[0]));
-  CeedCall(CeedMalloc(dim * Q * P, &(*basis)->interp));
-  CeedCall(CeedMalloc(Q * P, &(*basis)->div));
+  CeedCall(CeedCalloc(dim * Q * P + 8, &(*basis)->interp));
+  CeedCall(CeedCalloc(Q * P + 8, &(*basis)->div));
   if (interp) memcpy((*basis)->interp, interp, dim * Q * P * sizeof(interp[0]));
   if (div) memcpy((*basis)->div, div, Q * P * sizeof(div[0]));
   CeedCall(ceed->BasisCreateHdiv(topo, dim, P, Q, interp, div, q_ref, q_weight, *basis));
@@ -1845,8 +1859,8 @@ int CeedBasisCreateHcurl(Ceed ceed, CeedElemTopology topo, CeedInt num_comp, Cee
   CeedCall(CeedMalloc(Q, &(*basis)->q_weight_1d));
   if (q_ref) memcpy((*basis)->q_ref_1d, q_ref, Q * dim * sizeof(q_ref[0]));
   if (q_weight) memcpy((*basis)->q_weight_1d, q_weight, Q * sizeof(q_weight[0]));
-  CeedCall(CeedMalloc(dim * Q * P, &(*basis)->interp));
-  CeedCall(CeedMalloc(curl_comp * Q * P, &(*basis)->curl));
+  CeedCall(CeedCalloc(dim * Q * P + 8, &(*basis)->interp));
+  CeedCall(CeedCalloc(curl_comp * Q * P + 8, &(*basis)->curl));
   if (interp) memcpy((*basis)->interp, interp, dim * Q * P * sizeof(interp[0]));
   if (curl) memcpy((*basis)->curl, curl, curl_comp * Q * P * sizeof(curl[0]));
   CeedCall(ceed->BasisCreateHcurl(topo, dim, P, Q, interp, curl, q_ref, q_weight, *basis));

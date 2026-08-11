@@ -7,6 +7,7 @@
 
 #include <ceed.h>
 #include <ceed/backend.h>
+#include <math.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -110,14 +111,26 @@ static int CeedVectorGetArrayWrite_Ref(CeedVector vec, CeedMemType mem_type, Cee
 }
 
 //------------------------------------------------------------------------------
-// Vector Restore Array
+// Vector Set Value
 //------------------------------------------------------------------------------
-static int CeedVectorRestoreArray_Ref(CeedVector vec) { return CEED_ERROR_SUCCESS; }
+static int CeedVectorSetValue_Ref(CeedVector vec, CeedScalar value) {
+  CeedSize        length;
+  CeedVector_Ref *impl;
 
-//------------------------------------------------------------------------------
-// Vector Restore Array Read
-//------------------------------------------------------------------------------
-static int CeedVectorRestoreArrayRead_Ref(CeedVector vec) { return CEED_ERROR_SUCCESS; }
+  CeedCallBackend(CeedVectorGetData(vec, &impl));
+  CeedCallBackend(CeedVectorGetLength(vec, &length));
+  if (!length) return CEED_ERROR_SUCCESS;
+  if (!impl->array) {
+    CeedCallBackend(CeedCalloc(length, &impl->array_owned));
+    impl->array = impl->array_owned;
+  }
+  if (value == 0.0 && !signbit(value)) {
+    memset(impl->array, 0, length * sizeof(CeedScalar));
+  } else {
+    for (CeedSize i = 0; i < length; i++) impl->array[i] = value;
+  }
+  return CEED_ERROR_SUCCESS;
+}
 
 //------------------------------------------------------------------------------
 // Vector Destroy
@@ -146,8 +159,7 @@ int CeedVectorCreate_Ref(CeedSize n, CeedVector vec) {
   CeedCallBackend(CeedSetBackendFunction(ceed, "Vector", vec, "GetArray", CeedVectorGetArray_Ref));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Vector", vec, "GetArrayRead", CeedVectorGetArrayRead_Ref));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Vector", vec, "GetArrayWrite", CeedVectorGetArrayWrite_Ref));
-  CeedCallBackend(CeedSetBackendFunction(ceed, "Vector", vec, "RestoreArray", CeedVectorRestoreArray_Ref));
-  CeedCallBackend(CeedSetBackendFunction(ceed, "Vector", vec, "RestoreArrayRead", CeedVectorRestoreArrayRead_Ref));
+  CeedCallBackend(CeedSetBackendFunction(ceed, "Vector", vec, "SetValue", CeedVectorSetValue_Ref));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Vector", vec, "Destroy", CeedVectorDestroy_Ref));
   CeedCallBackend(CeedDestroy(&ceed));
   CeedCallBackend(CeedCalloc(1, &impl));

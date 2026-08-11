@@ -5,6 +5,7 @@
 //TESTARGS(name="length 10") {ceed_resource} 10
 //TESTARGS(name="length 0") {ceed_resource} 0
 #include <ceed.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -64,6 +65,20 @@ int main(int argc, char **argv) {
   CeedVectorCreate(ceed, len, &x);
   CeedVectorSetValue(x, 5.0);
   CheckValues(ceed, x, 5.0);
+  CeedVectorDestroy(&x);
+
+  // Set negative zero and check its sign
+  CeedVectorCreate(ceed, len, &x);
+  CeedVectorSetValue(x, -0.0);
+  {
+    const CeedScalar *read_array;
+
+    CeedVectorGetArrayRead(x, CEED_MEM_HOST, &read_array);
+    for (CeedInt i = 0; i < len; i++) {
+      if (!signbit(read_array[i])) printf("Error reading array[%" CeedInt_FMT "] = %f without negative sign\n", i, read_array[i]);
+    }
+    CeedVectorRestoreArrayRead(x, &read_array);
+  }
   CeedVectorDestroy(&x);
 
   CeedDestroy(&ceed);

@@ -22,6 +22,13 @@ typedef struct {
 typedef struct {
   bool                 is_identity_qf, is_identity_rstr_op;
   bool                *skip_rstr_in, *skip_rstr_out, *apply_add_basis_out;
+  bool                *is_input_active, *is_output_active;
+  CeedEvalMode        *input_eval_modes, *output_eval_modes;
+  CeedInt              num_active_rstr_inputs;
+  CeedInt             *active_rstr_input_indices;
+  CeedInt             *input_elem_sizes, *input_field_sizes, *input_num_comps;
+  CeedBasis           *input_bases, *output_bases;
+  CeedVector          *input_vectors, *output_vectors;
   CeedElemRestriction *block_rstr;   /* Blocked versions of restrictions */
   CeedVector          *e_vecs_full;  /* Full E-vectors, inputs followed by outputs */
   uint64_t            *input_states; /* State counter of inputs */
@@ -29,7 +36,7 @@ typedef struct {
   CeedVector          *e_vecs_out;   /* Element block output E-vectors */
   CeedVector          *q_vecs_in;    /* Element block input Q-vectors  */
   CeedVector          *q_vecs_out;   /* Element block output Q-vectors */
-  CeedInt              num_inputs, num_outputs;
+  CeedInt              block_size, num_blocks, Q, num_inputs, num_outputs;
   CeedInt              qf_size_in, qf_size_out;
   CeedVector           qf_l_vec;
   CeedElemRestriction  qf_block_rstr;
