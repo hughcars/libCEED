@@ -8,6 +8,7 @@
 #include <ceed.h>
 #include <ceed/backend.h>
 #include <ceed/jit-tools.h>
+#include <math.h>
 #include <string.h>
 
 #ifdef CEED_MAGMA_USE_HIP
@@ -278,6 +279,248 @@ int CeedBasisApplyAtPoints_Magma(CeedBasis basis, const CeedInt num_elem, const 
 }
 
 //------------------------------------------------------------------------------
+// Basis apply - non-tensor AtPoints
+//------------------------------------------------------------------------------
+static int CeedSizeMultiplyAtPoints_Magma(Ceed ceed, CeedSize factor_1, CeedSize factor_2, CeedSize *product) {
+  CeedCheck(factor_1 >= 0 && factor_2 >= 0, ceed, CEED_ERROR_DIMENSION, "Cannot multiply negative vector dimensions");
+  CeedCheck(!factor_1 || factor_2 <= PTRDIFF_MAX / factor_1, ceed, CEED_ERROR_DIMENSION, "AtPoints vector dimension exceeds CeedSize range");
+  *product = factor_1 * factor_2;
+  return CEED_ERROR_SUCCESS;
+}
+
+static int CeedBasisUpdatePointsAtPoints_Magma(Ceed ceed, Ceed_Magma *data, CeedBasisNonTensor_Magma *impl, CeedInt num_elem,
+                                               const CeedInt *num_points) {
+  CeedSize num_bytes;
+
+  CeedCallBackend(CeedSizeMultiplyAtPoints_Magma(ceed, num_elem, sizeof(CeedInt), &num_bytes));
+  if (num_elem == impl->num_elem_at_points && !memcmp(impl->h_points_per_elem, num_points, num_bytes)) return CEED_ERROR_SUCCESS;
+
+  CeedInt *d_points_new = NULL, *h_points_new = NULL;
+  int      ierr;
+
+  CeedCallBackend(CeedCalloc(num_elem, &h_points_new));
+  memcpy(h_points_new, num_points, num_bytes);
+  ierr = magma_malloc((void **)&d_points_new, num_bytes);
+  if (ierr) {
+    (void)CeedFree(&h_points_new);
+    return ierr;
+  }
+  magma_setvector(num_elem, sizeof(CeedInt), num_points, 1, d_points_new, 1, data->queue);
+  ceed_magma_queue_sync(data->queue);
+  {
+    CeedInt *d_points_old = impl->d_points_per_elem, *h_points_old = impl->h_points_per_elem;
+
+    impl->d_points_per_elem  = d_points_new;
+    impl->h_points_per_elem  = h_points_new;
+    impl->num_elem_at_points = num_elem;
+    ierr                     = d_points_old ? magma_free(d_points_old) : 0;
+    CeedCallBackend(CeedFree(&h_points_old));
+    if (ierr) return ierr;
+  }
+  return CEED_ERROR_SUCCESS;
+}
+
+static int CeedBasisApplyAtPointsNonTensorCore_Magma(CeedBasis basis, bool apply_add, const CeedInt num_elem, const CeedInt *num_points,
+                                                     CeedTransposeMode t_mode, CeedEvalMode eval_mode, CeedVector x_ref, CeedVector u, CeedVector v) {
+  Ceed        ceed         = CeedBasisReturnCeed(basis);
+  const bool  is_transpose = t_mode == CEED_TRANSPOSE;
+  Ceed_Magma *data;
+  CeedInt     dim, num_nodes, num_comp, q_comp, modal_topology, degree_at_points, num_modes_at_points, max_num_points = 0, storage_points_per_elem;
+  CeedSize    u_len, v_len, points_stride, compact_uniform_size, nodes_len;
+  const CeedScalar         *d_x = NULL, *d_u = NULL, *modal_at_points;
+  CeedScalar               *d_v = NULL;
+  CeedBasisNonTensor_Magma *impl;
+  bool                      is_padded, x_array_acquired = false, u_array_acquired = false, v_array_acquired = false;
+  int                       ierr = CEED_ERROR_SUCCESS;
+
+  if (eval_mode == CEED_EVAL_WEIGHT) {
+    CeedCallBackend(CeedVectorSetValue(v, 1.0));
+    return CEED_ERROR_SUCCESS;
+  }
+
+  CeedCallBackend(CeedGetData(ceed, &data));
+  CeedCallBackend(CeedBasisGetData(basis, &impl));
+  CeedCallBackend(CeedBasisGetDimension(basis, &dim));
+  CeedCallBackend(CeedBasisGetNumNodes(basis, &num_nodes));
+  CeedCallBackend(CeedBasisGetNumComponents(basis, &num_comp));
+  CeedCallBackend(CeedBasisGetNumQuadratureComponents(basis, eval_mode, &q_comp));
+  CeedCheck(eval_mode == CEED_EVAL_INTERP || eval_mode == CEED_EVAL_GRAD, ceed, CEED_ERROR_UNSUPPORTED,
+            "Non-tensor AtPoints only supports CEED_EVAL_INTERP and CEED_EVAL_GRAD");
+
+  for (CeedInt i = 0; i < num_elem; i++) max_num_points = CeedIntMax(max_num_points, num_points[i]);
+  if (max_num_points == 0) {
+    if (is_transpose && !apply_add) CeedCallBackend(CeedVectorSetValue(v, 0.0));
+    return CEED_ERROR_SUCCESS;
+  }
+  CeedCallBackend(CeedBasisGetAtPointsLayout(basis, num_elem, num_points, t_mode, eval_mode, x_ref, u, v, &is_padded, &points_stride));
+  CeedCallBackend(CeedSizeMultiplyAtPoints_Magma(ceed, num_elem, max_num_points, &compact_uniform_size));
+  CeedCheck(is_padded || points_stride == compact_uniform_size, ceed, CEED_ERROR_BACKEND,
+            "MAGMA non-tensor AtPoints requires compact point storage to have a uniform number of points per element");
+  CeedCheck(points_stride / num_elem <= INT_MAX, ceed, CEED_ERROR_DIMENSION, "AtPoints padding exceeds CeedInt range");
+  storage_points_per_elem = (CeedInt)(points_stride / num_elem);
+  CeedCallBackend(CeedVectorGetLength(u, &u_len));
+  CeedCallBackend(CeedVectorGetLength(v, &v_len));
+  CeedCallBackend(CeedSizeMultiplyAtPoints_Magma(ceed, num_elem, num_nodes, &nodes_len));
+  CeedCallBackend(CeedSizeMultiplyAtPoints_Magma(ceed, nodes_len, num_comp, &nodes_len));
+  CeedCheck((is_transpose ? v_len : u_len) >= nodes_len, ceed, CEED_ERROR_BACKEND,
+            "Vector at nodes incompatible with non-tensor BasisApplyAtPoints. Found %" CeedSize_FMT ", Required %" CeedSize_FMT,
+            is_transpose ? v_len : u_len, nodes_len);
+
+  CeedCallBackend(CeedBasisGetNonTensorAtPoints(basis, eval_mode, &modal_topology, &degree_at_points, &num_modes_at_points, &modal_at_points));
+
+  CeedCallBackend(CeedBasisUpdatePointsAtPoints_Magma(ceed, data, impl, num_elem, num_points));
+
+  {
+    CeedScalar **d_modal_at_points = eval_mode == CEED_EVAL_INTERP ? &impl->d_interp_at_points : &impl->d_grad_at_points;
+
+    if (!*d_modal_at_points) {
+      CeedScalar *d_modal_new = NULL;
+      CeedSize    modal_size, modal_bytes;
+
+      CeedCallBackend(CeedSizeMultiplyAtPoints_Magma(ceed, q_comp, num_modes_at_points, &modal_size));
+      CeedCallBackend(CeedSizeMultiplyAtPoints_Magma(ceed, modal_size, num_nodes, &modal_size));
+      CeedCheck(modal_size <= INT_MAX, ceed, CEED_ERROR_DIMENSION, "Non-tensor AtPoints modal data exceeds MAGMA index range");
+      CeedCallBackend(CeedSizeMultiplyAtPoints_Magma(ceed, modal_size, sizeof(CeedScalar), &modal_bytes));
+      CeedCallBackend(magma_malloc((void **)&d_modal_new, modal_bytes));
+      magma_setvector((magma_int_t)modal_size, sizeof(CeedScalar), modal_at_points, 1, d_modal_new, 1, data->queue);
+      *d_modal_at_points = d_modal_new;
+    }
+  }
+
+  {
+    CeedMagmaModule   *module_at_points = eval_mode == CEED_EVAL_INTERP ? &impl->moduleInterpAtPoints : &impl->moduleGradAtPoints;
+    CeedMagmaFunction *kernel_at_points = eval_mode == CEED_EVAL_INTERP ? &impl->InterpAtPoints : &impl->GradAtPoints;
+    CeedMagmaFunction *kernel_transpose = eval_mode == CEED_EVAL_INTERP ? &impl->InterpTransposeAtPoints : &impl->GradTransposeAtPoints;
+    CeedInt           *kernel_degree    = eval_mode == CEED_EVAL_INTERP ? &impl->interp_kernel_degree_at_points : &impl->grad_kernel_degree_at_points;
+    CeedInt *kernel_num_modes = eval_mode == CEED_EVAL_INTERP ? &impl->interp_kernel_num_modes_at_points : &impl->grad_kernel_num_modes_at_points;
+    CeedInt *kernel_modal_topology =
+        eval_mode == CEED_EVAL_INTERP ? &impl->interp_kernel_modal_topology_at_points : &impl->grad_kernel_modal_topology_at_points;
+
+    if (*kernel_degree != degree_at_points || *kernel_num_modes != num_modes_at_points || *kernel_modal_topology != modal_topology) {
+      const char basis_kernel_source[] = "// Nontensor basis AtPoints source\n#include <ceed/jit-source/cuda/cuda-ref-basis-nontensor-at-points.h>\n";
+      CeedMagmaModule   module_new     = NULL;
+      CeedMagmaFunction kernel_new = NULL, kernel_transpose_new = NULL;
+      Ceed              ceed_delegate = NULL;
+      CeedInt           q_comp_interp;
+      int               ierr, ierr_destroy;
+
+      CeedCallBackend(CeedBasisGetNumQuadratureComponents(basis, CEED_EVAL_INTERP, &q_comp_interp));
+      CeedCallBackend(CeedGetDelegate(ceed, &ceed_delegate));
+      ierr = CeedCompileMagma(ceed_delegate, basis_kernel_source, "basis_nontensor_at_points", &module_new, 7, "BASIS_P", num_nodes, "BASIS_NUM_COMP",
+                              num_comp, "BASIS_Q_COMP_INTERP", q_comp_interp, "BASIS_POLY_DEGREE", degree_at_points, "BASIS_NUM_MODES",
+                              num_modes_at_points, "BASIS_DIM", dim, "BASIS_MODAL_TOPOLOGY", modal_topology);
+      ierr_destroy = CeedDestroy(&ceed_delegate);
+      if (!ierr) ierr = ierr_destroy;
+      if (ierr) goto compile_cleanup;
+      ierr = CeedGetKernelMagma(ceed, module_new, eval_mode == CEED_EVAL_INTERP ? "InterpAtPoints" : "GradAtPoints", &kernel_new);
+      if (ierr) goto compile_cleanup;
+      ierr = CeedGetKernelMagma(ceed, module_new, eval_mode == CEED_EVAL_INTERP ? "InterpTransposeAtPoints" : "GradTransposeAtPoints",
+                                &kernel_transpose_new);
+      if (ierr) goto compile_cleanup;
+      if (*module_at_points) {
+#ifdef CEED_MAGMA_USE_HIP
+        const hipError_t unload_result = hipModuleUnload(*module_at_points);
+
+        if (unload_result != hipSuccess) {
+          (void)hipModuleUnload(module_new);
+          CeedCallHip(ceed, unload_result);
+        }
+#else
+        const CUresult unload_result = cuModuleUnload(*module_at_points);
+
+        if (unload_result != CUDA_SUCCESS) {
+          (void)cuModuleUnload(module_new);
+          CeedChk_Cu(ceed, unload_result);
+        }
+#endif
+      }
+      *module_at_points      = module_new;
+      *kernel_at_points      = kernel_new;
+      *kernel_transpose      = kernel_transpose_new;
+      *kernel_degree         = degree_at_points;
+      *kernel_num_modes      = num_modes_at_points;
+      *kernel_modal_topology = modal_topology;
+      goto compile_done;
+
+    compile_cleanup:
+      if (module_new) {
+#ifdef CEED_MAGMA_USE_HIP
+        (void)hipModuleUnload(module_new);
+#else
+        (void)cuModuleUnload(module_new);
+#endif
+      }
+      return ierr;
+    compile_done:;
+    }
+  }
+
+  ierr = CeedVectorGetArrayRead(x_ref, CEED_MEM_DEVICE, &d_x);
+  if (ierr) goto cleanup;
+  x_array_acquired = true;
+  ierr             = CeedVectorGetArrayRead(u, CEED_MEM_DEVICE, &d_u);
+  if (ierr) goto cleanup;
+  u_array_acquired = true;
+  if (apply_add) {
+    ierr = CeedVectorGetArray(v, CEED_MEM_DEVICE, &d_v);
+  } else {
+    if (is_transpose) {
+      ierr = CeedVectorSetValue(v, 0.0);
+      if (ierr) goto cleanup;
+    }
+    ierr = CeedVectorGetArrayWrite(v, CEED_MEM_DEVICE, &d_v);
+  }
+  if (ierr) goto cleanup;
+  v_array_acquired = true;
+  {
+    CeedScalar       *d_B = eval_mode == CEED_EVAL_INTERP ? impl->d_interp_at_points : impl->d_grad_at_points;
+    CeedMagmaFunction kernel;
+    void             *basis_args[] = {(void *)&num_elem, &storage_points_per_elem, &d_B, &impl->d_points_per_elem, &d_x, &d_u, &d_v};
+    CeedInt           block_size;
+
+    if (eval_mode == CEED_EVAL_INTERP) {
+      kernel = is_transpose ? impl->InterpTransposeAtPoints : impl->InterpAtPoints;
+    } else {
+      kernel = is_transpose ? impl->GradTransposeAtPoints : impl->GradAtPoints;
+    }
+    block_size = CeedIntMin(is_transpose ? num_nodes : max_num_points, 128);
+    ierr       = CeedRunKernelMagma(ceed, kernel, num_elem, block_size, basis_args);
+    if (ierr) goto cleanup;
+  }
+  ceed_magma_queue_sync(data->queue);
+
+cleanup:
+  if (v_array_acquired) {
+    const int cleanup_ierr = CeedVectorRestoreArray(v, &d_v);
+
+    if (!ierr) ierr = cleanup_ierr;
+  }
+  if (u_array_acquired) {
+    const int cleanup_ierr = CeedVectorRestoreArrayRead(u, &d_u);
+
+    if (!ierr) ierr = cleanup_ierr;
+  }
+  if (x_array_acquired) {
+    const int cleanup_ierr = CeedVectorRestoreArrayRead(x_ref, &d_x);
+
+    if (!ierr) ierr = cleanup_ierr;
+  }
+  return ierr;
+}
+
+static int CeedBasisApplyAtPointsNonTensor_Magma(CeedBasis basis, const CeedInt num_elem, const CeedInt *num_points, CeedTransposeMode t_mode,
+                                                 CeedEvalMode eval_mode, CeedVector x_ref, CeedVector u, CeedVector v) {
+  CeedCallBackend(CeedBasisApplyAtPointsNonTensorCore_Magma(basis, false, num_elem, num_points, t_mode, eval_mode, x_ref, u, v));
+  return CEED_ERROR_SUCCESS;
+}
+
+static int CeedBasisApplyAddAtPointsNonTensor_Magma(CeedBasis basis, const CeedInt num_elem, const CeedInt *num_points, CeedTransposeMode t_mode,
+                                                    CeedEvalMode eval_mode, CeedVector x_ref, CeedVector u, CeedVector v) {
+  CeedCallBackend(CeedBasisApplyAtPointsNonTensorCore_Magma(basis, true, num_elem, num_points, t_mode, eval_mode, x_ref, u, v));
+  return CEED_ERROR_SUCCESS;
+}
+
+//------------------------------------------------------------------------------
 // Basis apply - non-tensor
 //------------------------------------------------------------------------------
 static int CeedBasisApplyNonTensorCore_Magma(CeedBasis basis, bool apply_add, CeedInt num_elem, CeedTransposeMode t_mode, CeedEvalMode e_mode,
@@ -516,11 +759,29 @@ static int CeedBasisDestroyNonTensor_Magma(CeedBasis basis) {
 #endif
     }
   }
+  if (impl->moduleInterpAtPoints) {
+#ifdef CEED_MAGMA_USE_HIP
+    CeedCallHip(ceed, hipModuleUnload(impl->moduleInterpAtPoints));
+#else
+    CeedCallCuda(ceed, cuModuleUnload(impl->moduleInterpAtPoints));
+#endif
+  }
+  if (impl->moduleGradAtPoints) {
+#ifdef CEED_MAGMA_USE_HIP
+    CeedCallHip(ceed, hipModuleUnload(impl->moduleGradAtPoints));
+#else
+    CeedCallCuda(ceed, cuModuleUnload(impl->moduleGradAtPoints));
+#endif
+  }
   CeedCallBackend(magma_free(impl->d_interp));
   CeedCallBackend(magma_free(impl->d_grad));
   CeedCallBackend(magma_free(impl->d_div));
   CeedCallBackend(magma_free(impl->d_curl));
   if (impl->d_q_weight) CeedCallBackend(magma_free(impl->d_q_weight));
+  CeedCallBackend(CeedFree(&impl->h_points_per_elem));
+  if (impl->d_points_per_elem) CeedCallBackend(magma_free(impl->d_points_per_elem));
+  if (impl->d_interp_at_points) CeedCallBackend(magma_free(impl->d_interp_at_points));
+  if (impl->d_grad_at_points) CeedCallBackend(magma_free(impl->d_grad_at_points));
   CeedCallBackend(CeedFree(&impl));
   CeedCallBackend(CeedDestroy(&ceed));
   return CEED_ERROR_SUCCESS;
@@ -663,6 +924,8 @@ int CeedBasisCreateH1_Magma(CeedElemTopology topo, CeedInt dim, CeedInt num_node
   // Register backend functions
   CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "Apply", CeedBasisApplyNonTensor_Magma));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "ApplyAdd", CeedBasisApplyAddNonTensor_Magma));
+  CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "ApplyAtPoints", CeedBasisApplyAtPointsNonTensor_Magma));
+  CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "ApplyAddAtPoints", CeedBasisApplyAddAtPointsNonTensor_Magma));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "Destroy", CeedBasisDestroyNonTensor_Magma));
   CeedCallBackend(CeedDestroy(&ceed));
   return CEED_ERROR_SUCCESS;
@@ -721,6 +984,8 @@ int CeedBasisCreateHdiv_Magma(CeedElemTopology topo, CeedInt dim, CeedInt num_no
   // Register backend functions
   CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "Apply", CeedBasisApplyNonTensor_Magma));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "ApplyAdd", CeedBasisApplyAddNonTensor_Magma));
+  CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "ApplyAtPoints", CeedBasisApplyAtPointsNonTensor_Magma));
+  CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "ApplyAddAtPoints", CeedBasisApplyAddAtPointsNonTensor_Magma));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "Destroy", CeedBasisDestroyNonTensor_Magma));
   CeedCallBackend(CeedDestroy(&ceed));
   return CEED_ERROR_SUCCESS;
@@ -779,6 +1044,8 @@ int CeedBasisCreateHcurl_Magma(CeedElemTopology topo, CeedInt dim, CeedInt num_n
   // Register backend functions
   CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "Apply", CeedBasisApplyNonTensor_Magma));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "ApplyAdd", CeedBasisApplyAddNonTensor_Magma));
+  CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "ApplyAtPoints", CeedBasisApplyAtPointsNonTensor_Magma));
+  CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "ApplyAddAtPoints", CeedBasisApplyAddAtPointsNonTensor_Magma));
   CeedCallBackend(CeedSetBackendFunction(ceed, "Basis", basis, "Destroy", CeedBasisDestroyNonTensor_Magma));
   CeedCallBackend(CeedDestroy(&ceed));
   return CEED_ERROR_SUCCESS;

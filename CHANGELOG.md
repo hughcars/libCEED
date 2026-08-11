@@ -23,6 +23,7 @@ These functions will be removed when the SYCL backends are updated to reflect th
 
 ### New features
 
+- Add non-tensor basis AtPoints interpolation and H1 gradient evaluation for line, triangle, tetrahedron, prism, and pyramid elements to the host, CUDA reference, and CUDA/HIP MAGMA backends.
 - Add `CeedOperatorCreateAtPoints` which evaluates the `CeedQFunction` at arbitrary locations in each element, for use in Particle in Cell, Material Point Method, and similar methods.
 - Add `CeedElemRestrictionGetLLayout` to provide L-vector layout for strided `CeedElemRestriction` created with `CEED_BACKEND_STRIDES`.
 - Add `CeedVectorReturnCeed` and similar when parent `Ceed` context for a libCEED object is only needed once in a calling scope.

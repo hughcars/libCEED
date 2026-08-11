@@ -89,11 +89,28 @@ typedef struct {
   CUfunction  Deriv;
   CUfunction  DerivTranspose;
   CUfunction  Weight;
+  CUmodule    moduleInterpAtPoints;
+  CUmodule    moduleGradAtPoints;
+  CUfunction  InterpAtPoints;
+  CUfunction  InterpTransposeAtPoints;
+  CUfunction  GradAtPoints;
+  CUfunction  GradTransposeAtPoints;
   CeedScalar *d_interp;
   CeedScalar *d_grad;
   CeedScalar *d_div;
   CeedScalar *d_curl;
   CeedScalar *d_q_weight;
+  CeedScalar *d_interp_at_points;
+  CeedScalar *d_grad_at_points;
+  CeedInt     num_elem_at_points;
+  CeedInt    *h_points_per_elem;
+  CeedInt    *d_points_per_elem;
+  CeedInt     interp_kernel_num_modes_at_points;
+  CeedInt     interp_kernel_degree_at_points;
+  CeedInt     interp_kernel_modal_topology_at_points;
+  CeedInt     grad_kernel_num_modes_at_points;
+  CeedInt     grad_kernel_degree_at_points;
+  CeedInt     grad_kernel_modal_topology_at_points;
 } CeedBasisNonTensor_Cuda;
 
 typedef struct {

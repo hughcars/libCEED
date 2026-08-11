@@ -66,6 +66,12 @@ typedef struct {
   CeedMagmaFunction DerivTranspose[MAGMA_NONTENSOR_KERNEL_INSTANCES];
   CeedMagmaFunction DerivTransposeAdd[MAGMA_NONTENSOR_KERNEL_INSTANCES];
   CeedMagmaFunction Weight;
+  CeedMagmaModule   moduleInterpAtPoints;
+  CeedMagmaModule   moduleGradAtPoints;
+  CeedMagmaFunction InterpAtPoints;
+  CeedMagmaFunction InterpTransposeAtPoints;
+  CeedMagmaFunction GradAtPoints;
+  CeedMagmaFunction GradTransposeAtPoints;
   CeedInt           NB_interp[MAGMA_NONTENSOR_KERNEL_INSTANCES], NB_interp_t[MAGMA_NONTENSOR_KERNEL_INSTANCES];
   CeedInt           NB_deriv[MAGMA_NONTENSOR_KERNEL_INSTANCES], NB_deriv_t[MAGMA_NONTENSOR_KERNEL_INSTANCES];
   CeedScalar       *d_interp;
@@ -73,6 +79,17 @@ typedef struct {
   CeedScalar       *d_div;
   CeedScalar       *d_curl;
   CeedScalar       *d_q_weight;
+  CeedScalar       *d_interp_at_points;
+  CeedScalar       *d_grad_at_points;
+  CeedInt           num_elem_at_points;
+  CeedInt          *h_points_per_elem;
+  CeedInt          *d_points_per_elem;
+  CeedInt           interp_kernel_num_modes_at_points;
+  CeedInt           interp_kernel_degree_at_points;
+  CeedInt           interp_kernel_modal_topology_at_points;
+  CeedInt           grad_kernel_num_modes_at_points;
+  CeedInt           grad_kernel_degree_at_points;
+  CeedInt           grad_kernel_modal_topology_at_points;
 } CeedBasisNonTensor_Magma;
 
 CEED_INTERN int CeedBasisCreateTensorH1_Magma(CeedInt dim, CeedInt P_1d, CeedInt Q_1d, const CeedScalar *interp_1d, const CeedScalar *grad_1d,
