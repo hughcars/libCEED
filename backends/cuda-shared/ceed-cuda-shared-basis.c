@@ -10,6 +10,7 @@
 #include <ceed/jit-tools.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
@@ -214,11 +215,13 @@ static int CeedBasisApplyAtPointsCore_Cuda_shared(CeedBasis basis, bool apply_ad
                                                   CeedTransposeMode t_mode, CeedEvalMode eval_mode, CeedVector x_ref, CeedVector u, CeedVector v) {
   Ceed                   ceed;
   Ceed_Cuda             *ceed_Cuda;
-  CeedInt                Q_1d, dim, num_comp, max_num_points = num_points[0];
+  CeedInt                Q_1d, dim, num_comp, max_num_points = num_points[0], storage_points_per_elem;
+  CeedSize               points_stride;
   const CeedInt          is_transpose = t_mode == CEED_TRANSPOSE;
   const CeedScalar      *d_x, *d_u;
   CeedScalar            *d_v;
   CeedBasis_Cuda_shared *data;
+  bool                   is_padded;
 
   CeedCallBackend(CeedBasisGetData(basis, &data));
   CeedCallBackend(CeedBasisGetNumQuadraturePoints1D(basis, &Q_1d));
@@ -236,12 +239,19 @@ static int CeedBasisApplyAtPointsCore_Cuda_shared(CeedBasis basis, bool apply_ad
 
   // Check padded to uniform number of points per elem
   for (CeedInt i = 1; i < num_elem; i++) max_num_points = CeedIntMax(max_num_points, num_points[i]);
+  CeedCallBackend(CeedBasisGetAtPointsLayout(basis, num_elem, num_points, t_mode, eval_mode, x_ref, u, v, &is_padded, &points_stride));
+  CeedCheck(points_stride % num_elem == 0 && points_stride / num_elem <= INT_MAX, ceed, CEED_ERROR_DIMENSION,
+            "AtPoints padding exceeds CeedInt range");
+  storage_points_per_elem = (CeedInt)(points_stride / num_elem);
+  CeedCheck(storage_points_per_elem >= max_num_points, ceed, CEED_ERROR_BACKEND,
+            "Vector at points must be padded to the same number of points in each element for BasisApplyAtPoints on GPU backends");
+  (void)is_padded;
   {
     CeedInt  q_comp;
     CeedSize len, len_required;
     CeedCallBackend(CeedBasisGetNumQuadratureComponents(basis, eval_mode, &q_comp));
     CeedCallBackend(CeedVectorGetLength(is_transpose ? u : v, &len));
-    len_required = (CeedSize)num_comp * (CeedSize)q_comp * (CeedSize)num_elem * (CeedSize)max_num_points;
+    len_required = (CeedSize)num_comp * (CeedSize)q_comp * points_stride;
     CeedCheck(len >= len_required, ceed, CEED_ERROR_BACKEND,
               "Vector at points must be padded to the same number of points in each element for BasisApplyAtPoints on GPU backends."
               " Found %" CeedSize_FMT ", Required %" CeedSize_FMT,
@@ -267,11 +277,11 @@ static int CeedBasisApplyAtPointsCore_Cuda_shared(CeedBasis basis, bool apply_ad
   }
 
   // Build kernels if needed
-  if (data->num_points != max_num_points) {
+  if (data->num_points != storage_points_per_elem) {
     CeedInt P_1d;
 
     CeedCallBackend(CeedBasisGetNumNodes1D(basis, &P_1d));
-    data->num_points = max_num_points;
+    data->num_points = storage_points_per_elem;
 
     // -- Create interp matrix to Chebyshev coefficients
     if (!data->d_chebyshev_interp_1d) {
@@ -294,7 +304,7 @@ static int CeedBasisApplyAtPointsCore_Cuda_shared(CeedBasis basis, bool apply_ad
     CeedCallBackend(CeedBasisGetNumComponents(basis, &num_comp));
     CeedCallBackend(CeedCompile_Cuda(ceed, basis_kernel_source, "basis_at_points_shared", &data->moduleAtPoints, 8, "BASIS_Q_1D", Q_1d, "BASIS_P_1D",
                                      P_1d, "BASIS_T_1D", CeedIntMax(Q_1d, P_1d), "BASIS_DIM", dim, "BASIS_NUM_COMP", num_comp, "BASIS_NUM_NODES",
-                                     CeedIntPow(P_1d, dim), "BASIS_NUM_QPTS", CeedIntPow(Q_1d, dim), "BASIS_NUM_PTS", max_num_points));
+                                     CeedIntPow(P_1d, dim), "BASIS_NUM_QPTS", CeedIntPow(Q_1d, dim), "BASIS_NUM_PTS", storage_points_per_elem));
     CeedCallBackend(CeedGetKernel_Cuda(ceed, data->moduleAtPoints, "InterpAtPoints", &data->InterpAtPoints));
     CeedCallBackend(CeedGetKernel_Cuda(ceed, data->moduleAtPoints, "InterpTransposeAtPoints", &data->InterpTransposeAtPoints));
     CeedCallBackend(CeedGetKernel_Cuda(ceed, data->moduleAtPoints, "InterpTransposeAddAtPoints", &data->InterpTransposeAddAtPoints));
