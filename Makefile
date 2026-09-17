@@ -331,6 +331,8 @@ avx.c          := $(sort $(wildcard backends/avx/*.c))
 avx.h          := $(sort $(wildcard backends/avx/*.h))
 sve.c          := $(sort $(wildcard backends/sve/*.c))
 sve.h          := $(sort $(wildcard backends/sve/*.h))
+sme.c          := $(sort $(wildcard backends/sme/*.c))
+sme.h          := $(sort $(wildcard backends/sme/*.h))
 xsmm.c         := $(sort $(wildcard backends/xsmm/*.c))
 xsmm.h         := $(sort $(wildcard backends/xsmm/*.h))
 # - GPU
@@ -482,6 +484,7 @@ info:
 	$(info MEMCHK_STATUS = $(MEMCHK_STATUS)$(call backend_status,$(MEMCHK_BACKENDS)))
 	$(info AVX_STATUS    = $(AVX_STATUS)$(call backend_status,$(AVX_BACKENDS)))
 	$(info SVE_STATUS    = $(SVE_STATUS)$(call backend_status,$(SVE_BACKENDS)))
+	$(info SME_STATUS    = $(SME_STATUS)$(call backend_status,$(SME_BACKENDS)))
 	$(info XSMM_DIR      = $(XSMM_DIR)$(call backend_status,$(XSMM_BACKENDS)))
 	$(info CUDA_DIR      = $(CUDA_DIR)$(call backend_status,$(CUDA_BACKENDS)))
 	$(info ROCM_DIR      = $(ROCM_DIR)$(call backend_status,$(HIP_BACKENDS)))
@@ -568,6 +571,23 @@ ifeq ($(SVE),1)
   libceed.c += $(sve.c)
   libceed.h += $(sve.h)
   BACKENDS_MAKE += $(SVE_BACKENDS)
+endif
+
+# Arm SME Backends
+SME_STATUS   = Disabled
+SME         := $(shell printf '%s\n' \
+  '$(HASH)include <arm_sme.h>' \
+  '$(HASH)include <stdint.h>' \
+  'static void k32(float *v, const float *u, uint64_t n) __arm_streaming __arm_inout("za") { svbool_t p = svwhilelt_b32((uint64_t)0, n); svfloat32_t x = svld1_f32(p, u); svld1_hor_za32(3, 0, p, u); svmopa_za32_f32_m(0, p, p, svread_ver_za32_f32_m(x, p, 3, 0), x); svst1_f32(p, v, svread_hor_za32_f32_m(x, p, 0, 0)); }' \
+  'static void k64(double *v, const double *u, uint64_t n) __arm_streaming __arm_inout("za") { svbool_t p = svwhilelt_b64((uint64_t)0, n); svfloat64_t x = svld1_f64(p, u); svld1_hor_za64(3, 0, p, u); svmopa_za64_f64_m(0, p, p, svread_ver_za64_f64_m(x, p, 3, 0), x); svst1_f64(p, v, svread_hor_za64_f64_m(x, p, 0, 0)); }' \
+  '__arm_locally_streaming __arm_new("za") void f(float *v32, const float *u32, double *v64, const double *u64, uint64_t n) { svzero_za(); k32(v32, u32, n); k64(v64, u64, n); }' \
+  | $(CC) $(CPPFLAGS) $(CFLAGS:-M%=) -Werror -x c -c -o /dev/null - >/dev/null 2>&1 && echo 1)
+SME_BACKENDS = /cpu/self/sme/serial /cpu/self/sme/blocked
+ifeq ($(SME),1)
+  SME_STATUS = Enabled
+  libceed.c += $(sme.c)
+  libceed.h += $(sme.h)
+  BACKENDS_MAKE += $(SME_BACKENDS)
 endif
 
 # Collect list of libraries and paths for use in linking and pkg-config

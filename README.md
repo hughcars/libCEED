@@ -163,6 +163,8 @@ There are multiple supported backends, which can be selected at runtime in the e
 | `/cpu/self/avx/blocked`    | Blocked AVX implementation                        | Yes                   |
 | `/cpu/self/sve/serial`     | Serial Arm SVE implementation                     | Yes                   |
 | `/cpu/self/sve/blocked`    | Blocked Arm SVE implementation                    | Yes                   |
+| `/cpu/self/sme/serial`     | Serial Arm SME implementation                     | Yes                   |
+| `/cpu/self/sme/blocked`    | Blocked Arm SME implementation                    | Yes                   |
 ||
 | **CPU Valgrind**           |
 | `/cpu/self/memcheck/*`     | Memcheck backends, undefined value checks         | Yes                   |
@@ -202,6 +204,8 @@ The `/cpu/self/opt/*` backends are written in pure C and use partial e-vectors t
 The `/cpu/self/avx/*` backends rely upon AVX instructions to provide vectorized CPU performance.
 
 The `/cpu/self/sve/*` backends use vector-length-agnostic Arm SVE instructions for tensor contractions, delegating other operations to the corresponding `/cpu/self/opt/*` backend. They are built when the active compiler target supports SVE, and the resulting library must run on an SVE-capable target.
+
+The `/cpu/self/sme/*` backends compute tensor contractions as Arm SME outer products accumulated in ZA tiles, delegating other operations to the corresponding `/cpu/self/opt/*` backend. They are built when the active compiler target supports SME with FP64 outer products (`+sme-f64f64`), and the resulting library must run on an SME-capable target.
 
 The `/cpu/self/memcheck/*` backends rely upon the [Valgrind](https://valgrind.org/) Memcheck tool to help verify that user QFunctions have no undefined values.
 To use, run your code with Valgrind and the Memcheck backends, e.g. `valgrind ./build/ex1 -ceed /cpu/self/ref/memcheck`.
